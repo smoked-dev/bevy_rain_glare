@@ -1,0 +1,13 @@
+[package]
+name = "rain_glare"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rain_glare"
+
+[features]
+webgl2 = []
+
+[dependencies]
+bevy = "0.14.2"
