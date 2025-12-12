@@ -37,31 +37,48 @@ pub const RAIN_GLARE_SHADER_HANDLE: Handle<Shader> =
 
 /// Component that enables the rain glare effect on a camera and configures its parameters.
 #[allow(dead_code)]
-#[derive(Component, Clone, Copy, Debug, ExtractComponent, ShaderType)]
+#[derive(Component, Clone, Copy, ExtractComponent, ShaderType)]
 pub struct RainGlareSettings {
     pub intensity: f32,
     pub threshold: f32,
     pub streak_length_px: f32,
     pub rain_density: f32,
+
     pub wind: Vec2,
     pub speed: f32,
     pub time: f32,
-    #[cfg(feature = "webgl2")]
-    _webgl2_padding: Vec2,
+
+    // NEW: smaller pattern = bigger scale (3.0 => ~3x smaller features)
+    pub pattern_scale: f32,
+    // NEW: hard-edged line thickness in pixels (keep ~0.5..1.25)
+    pub mask_thickness_px: f32,
+    // NEW: snap streak sampling to pixel centers (1.0 = on, 0.0 = off)
+    pub snap_to_pixel: f32,
+    // NEW: quantize mask intensity steps (0 = off, 8/16 = crunchy)
+    pub tail_quant_steps: f32,
+
+    /// 0..1: how “horizon-facing” the view is.
+    /// 1 = looking at horizon, 0 = straight up/down.
+    pub view_angle_factor: f32,
 }
 
 impl Default for RainGlareSettings {
     fn default() -> Self {
         Self {
-            intensity: 1.0,
-            threshold: 1.0,
-            streak_length_px: 80.0,
-            rain_density: 0.35,
-            wind: Vec2::new(0.25, -1.0),
-            speed: 1.0,
+            intensity: 0.35,
+            threshold: 0.65,
+            streak_length_px: 96.0,
+            rain_density: 0.55,
+            wind: Vec2::new(0.10, 1.0),
+            speed: 1.2,
             time: 0.0,
-            #[cfg(feature = "webgl2")]
-            _webgl2_padding: Vec2::ZERO,
+
+            pattern_scale: 3.0,
+            mask_thickness_px: 0.75,
+            snap_to_pixel: 1.0,
+            tail_quant_steps: 8.0,
+            
+            view_angle_factor: 1.0,
         }
     }
 }
@@ -247,8 +264,35 @@ impl FromWorld for RainGlarePipeline {
     }
 }
 
-fn advance_rain_time(time: Res<Time>, mut query: Query<&mut RainGlareSettings>) {
+/* fn advance_rain_time(time: Res<Time>, mut query: Query<&mut RainGlareSettings>) {
     for mut settings in &mut query {
         settings.time += time.delta_seconds();
+    }
+} */
+fn advance_rain_time(
+    time: Res<Time>,
+    mut q: Query<(&GlobalTransform, &mut RainGlareSettings), With<Camera3d>>,
+) {
+    let t = time.elapsed_seconds();
+
+    for (global_transform, mut settings) in &mut q {
+        settings.time = t;
+
+        // World-space view direction (forward).
+        // GlobalTransform::forward() returns Dir3; convert to Vec3.
+        let forward: Vec3 = global_transform.forward().into();
+
+        // World up (assuming Y-up). Change if you use a different up-axis.
+        let world_up = Vec3::Y;
+
+        // How much the camera is pointing up/down.
+        let vertical = forward.dot(world_up);           // -1..1
+        let horizon = (1.0 - vertical.abs()).clamp(0.0, 1.0);
+
+        // Sharpen so it’s strong near the horizon, fades faster near zenith/nadir.
+        let exponent = 2.0;
+        let angle_factor = horizon.powf(exponent);
+
+        settings.view_angle_factor = angle_factor;
     }
 }

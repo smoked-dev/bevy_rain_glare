@@ -42,14 +42,19 @@ fn setup_scene(
         },
         BloomSettings::NATURAL,
         RainGlareSettings {
-            intensity: 0.95,
-            threshold: 0.15,
+            intensity: 0.25,
+            threshold: 0.45,
             streak_length_px: 10.0,
-            rain_density: 4.6,
+            rain_density: 3.6,
             wind: Vec2::new(0., -1.0),
-            speed: 9.4,
+            speed: 19.4,
+
+            pattern_scale: 1.0,        // 3x smaller mask features
+            mask_thickness_px: 0.65,   // thinner, sharper
+            snap_to_pixel: 1.0,        // crunchy edges
+            tail_quant_steps: 8.0,     // stepped intensity (retro banding)
             ..default()
-        },
+        }
     ));
 
     commands.spawn(DirectionalLightBundle {

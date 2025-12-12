@@ -9,6 +9,13 @@ struct RainGlareSettings {
     wind: vec2<f32>,
     speed: f32,
     time: f32,
+
+    pattern_scale: f32,
+    mask_thickness_px: f32,
+    snap_to_pixel: f32,
+    tail_quant_steps: f32,
+
+    view_angle_factor: f32,
 };
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
@@ -28,8 +35,6 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract(sin(h) * 43758.5453123);
 }
 
-// Procedural raindrops on the lens: thin streak lines oriented along `dir`.
-// Visible where bright highlights exist (multiplied against the streak result).
 fn lens_rain_mask(
     uv: vec2<f32>,
     dims: vec2<f32>,
@@ -37,6 +42,9 @@ fn lens_rain_mask(
     t: f32,
     density: f32,
     speed: f32,
+    pattern_scale: f32,
+    thickness_px: f32,
+    tail_quant_steps: f32,
 ) -> f32 {
     let p = uv * dims;
     let perp = vec2<f32>(-dir.y, dir.x);
@@ -44,29 +52,40 @@ fn lens_rain_mask(
     let u = dot(p, perp);
     let v = dot(p, dir);
 
-    // Spacing between streak lines in pixels.
-    let spacing = 7.0;
+    // Smaller pattern => smaller spacing/period.
+    let s = max(pattern_scale, 0.001);
+    let spacing = 7.0 / s;
+    let period  = 46.0 / s;
+
     let line_id = floor(u / spacing);
 
-    // Randomize which lines are active based on density.
+    // Randomize active lines based on density.
     let r = hash11(line_id * 12.9898 + 78.233);
     let line_active = step(r, clamp(density, 0.0, 1.0));
 
-    // Distance to the center of the current line cell, in pixels.
+    // Distance to line center in pixels.
     let dist = abs(fract(u / spacing) - 0.5) * spacing;
 
-    // Thin line profile (gaussian-ish).
-    let sigma = 0.8;
-    let width = exp(-(dist * dist) / (2.0 * sigma * sigma));
+    // HARD EDGE width (no smoothing). Clamp thickness so it can't exceed half the cell.
+    let thick = min(max(thickness_px, 0.1), spacing * 0.49);
+    let width = 1.0 - step(thick, dist); // 1 inside, 0 outside
 
-    // Droplet phase along the streak direction, moving over time.
-    let period = 46.0;
+    // Animate along direction.
     let phase = fract((v / period) + t * speed * 0.25 + r);
 
-    // Head at phase ~0, exponential tail as phase increases.
-    let tail = exp(-phase * 6.0);
+    // Tail shape (can be quantized for crunchy retro steps).
+    var tail = exp(-phase * 6.0);
+    if (tail_quant_steps >= 2.0) {
+        let steps = tail_quant_steps;
+        tail = floor(tail * steps) / steps;
+    }
 
     return clamp(line_active * width * tail, 0.0, 1.0);
+}
+
+fn snap_uv_to_pixel_center(uv: vec2<f32>, dims: vec2<f32>) -> vec2<f32> {
+    let px = floor(uv * dims) + vec2<f32>(0.5, 0.5);
+    return px / dims;
 }
 
 @fragment
@@ -79,16 +98,24 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let wind_len = length(settings.wind);
     let dir = select(vec2<f32>(0.0, 1.0), settings.wind / wind_len, wind_len > 1e-5);
 
-    // Lens-rain mask (thin moving streak lines).
-    let rain = lens_rain_mask(in.uv, dims, dir, settings.time, settings.rain_density, settings.speed);
+    let rain = lens_rain_mask(
+        in.uv, dims, dir,
+        settings.time,
+        settings.rain_density,
+        settings.speed,
+        settings.pattern_scale,
+        settings.mask_thickness_px,
+        settings.tail_quant_steps,
+    );
 
-    // Directional bright-pass smear (sample upstream so streaks trail downwind).
     let samples: i32 = 16;
     let len_uv = settings.streak_length_px / max(dims.y, 1.0);
     let step_uv = dir * (len_uv / f32(samples));
 
-    // Per-pixel jitter to reduce banding / overly perfect streaks.
-    let jitter = (hash12(in.uv * dims + vec2<f32>(settings.time, settings.time * 1.37)) - 0.5) * 0.9;
+    // Disable jitter when snapping (keeps the retro edges clean).
+    let jitter_mask = 1.0 - step(0.5, settings.snap_to_pixel);
+    let jitter = (hash12(in.uv * dims + vec2<f32>(settings.time, settings.time * 1.37)) - 0.5) * 0.9 * jitter_mask;
+
     let uv0 = in.uv + vec2<f32>(jitter / dims.x, 0.0);
 
     var accum = vec3<f32>(0.0);
@@ -98,20 +125,23 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let fi = f32(i);
         let suv = uv0 - step_uv * (fi + jitter);
 
-        let c = textureSample(screen_texture, screen_sampler, suv).rgb;
+        let use_snap = settings.snap_to_pixel >= 0.5;
+        let uv_s = select(suv, snap_uv_to_pixel_center(suv, dims), use_snap);
+
+        let c = textureSample(screen_texture, screen_sampler, uv_s).rgb;
+
+        // Bright-pass weight
         let b = clamp((luma(c) - settings.threshold) / max(1.0 - settings.threshold, 1e-5), 0.0, 1.0);
 
-        // Exponential falloff so the streak tapers.
         let w = b * exp(-fi * 0.16);
-
         accum += c * w;
         wsum += w;
     }
 
     let streak = accum / max(wsum, 1e-5);
-
-    // Only add glare where the lens rain mask says there's a droplet line.
-    let out_rgb = base.rgb + streak * (settings.intensity * rain);
+//    let out_rgb = base.rgb + streak * (settings.intensity * rain);
+    let angle_fade = settings.view_angle_factor;
+    let out_rgb = base.rgb + streak * (settings.intensity * rain * angle_fade);
 
     return vec4<f32>(out_rgb, base.a);
 }
